@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# Downloaded models (fetched on first run, not source)
+vision/models/
+
+# PlatformIO / Arduino
+.pio/
+.vscode/
+*.hex
+
+# CAD
+*.SLDPRT.lck
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+*.local
+
+# Build artifacts
+build/
+dist/
+*.log
+
+# Claude Code
+.claude/
+CLAUDE.md

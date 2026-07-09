@@ -1,0 +1,17 @@
+# Vision (Raspberry Pi 5 or laptop)
+opencv-python>=4.9
+mediapipe>=0.10
+
+# EMG signal processing
+numpy>=1.26
+scipy>=1.12
+scikit-learn>=1.4      # gesture classifier
+
+# Serial comms to ESP32 (motor control + EMG modules)
+pyserial>=3.5
+
+# Kinematics / motion planning
+sympy>=1.12
+
+# Testing
+pytest>=8.0
