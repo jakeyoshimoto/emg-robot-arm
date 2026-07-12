@@ -1,12 +1,7 @@
 """
-Finds a single, known-colored ball in the live camera feed and works out
-its pixel position and size, frame by frame. Simple color filtering plus
-some basic shape checking.
-
-How it works:
-Convert each frame to HSV color space. Keep only the pixels that fall
-inside a chosen color range (mask). Find the blob(s) of
-leftover pixels. Pick whichever blob looks most like a round ball.
+Finds a single, known-colored ball in the live camera feed and reports
+its pixel position and size, frame by frame. Plain HSV color filtering
+plus a roundness check, no ML involved.
 
 Usage:
     python vision/ball_detection.py
@@ -32,17 +27,16 @@ import argparse
 import cv2
 import numpy as np
 
-# Using HSV RGB because lighting changes move the V number around while
-# leaving H roughly alone. Filtering by hue holds up much better across
-# a room with uneven lighting than filtering by raw color would.
+# HSV holds up better than RGB under uneven lighting, since brightness
+# changes mostly just move V, leaving H alone. HSV_LOWER/HSV_UPPER define
+# a box in H/S/V space; a pixel is kept if it falls inside those bounds.
+# A second band (HSV_LOWER2/HSV_UPPER2) is only needed for colors like red
+# that wrap around past hue 179; blue sits mid-range so one band covers it.
 
-# HSV_LOWER/HSV_UPPER define a box in that H/S/V space. Any pixel whose
-# H, S, and V all fall inside those bounds gets kept.
-
-HSV_LOWER = (0, 170, 60)
-HSV_UPPER = (10, 255, 255)
-HSV_LOWER2 = (170, 170, 60)
-HSV_UPPER2 = (179, 255, 255)
+HSV_LOWER = (85, 90, 60)
+HSV_UPPER = (105, 255, 255)
+HSV_LOWER2 = None
+HSV_UPPER2 = None
 
 CAMERA_INDEX = 0
 MIN_RADIUS_PX = 8          # blobs smaller than this get ignored as noise, not the ball
@@ -63,17 +57,15 @@ def parse_args():
 
 
 def _nothing(_value):
-    # OpenCV's trackbar function requires a callback to run whenever the
-    # slider moves, but nothing needs to happen instantly. Current slider
-    # positions get read once per frame in read_trackbars() instead. So
-    # this callback intentionally does nothing.
+    # OpenCV's trackbar API requires a callback, but slider positions are
+    # only read once per frame in read_trackbars(), so there's nothing to
+    # do here.
     pass
 
 
 def create_trackbars():
-    # Opens a small window with six sliders, low/high for each of H, S, V.
-    # Lets the color range be adjusted live instead of editing the
-    # constants above and restarting the script repeatedly.
+    # Six sliders: low/high for each of H, S, V. Lets the color range be
+    # tuned live instead of editing constants and restarting the script.
     cv2.namedWindow(TUNE_WINDOW_NAME)
     cv2.createTrackbar("H min", TUNE_WINDOW_NAME, HSV_LOWER[0], 179, _nothing)
     cv2.createTrackbar("S min", TUNE_WINDOW_NAME, HSV_LOWER[1], 255, _nothing)
@@ -84,9 +76,9 @@ def create_trackbars():
 
 
 def read_trackbars():
-    # Reads wherever the six sliders currently sit and packages them up
-    # into the same (H, S, V) lower/upper format the rest of the script
-    # expects, so tuning mode and normal mode can share the same code path.
+    # Packages the current slider positions into the same (H, S, V)
+    # lower/upper format as the constants above, so tuning mode and
+    # normal mode share the same detection code.
     lower = np.array([
         cv2.getTrackbarPos("H min", TUNE_WINDOW_NAME),
         cv2.getTrackbarPos("S min", TUNE_WINDOW_NAME),
@@ -101,17 +93,12 @@ def read_trackbars():
 
 
 def build_mask(frame_bgr, lower, upper, lower2=None, upper2=None):
-    # A mask is a black-and-white image the same size as the
-    # camera frame. White wherever a pixel's color fell inside the chosen
-    # HSV range, black everywhere else. Marks everywhere the ball's color
-    # appears to be showing up.
+    # White wherever a pixel's color falls inside the HSV range, black
+    # elsewhere, i.e. everywhere the ball's color appears to show up.
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, lower, upper)
     if lower2 is not None:
-        # For red, a second band catches the other half of the red
-        # hues that wrapped around past 179. bitwise_or merges the two
-        # black-and-white masks together, a pixel shows up white if it
-        # matched either band.
+        # Second band for red's wraparound hue; OR the two masks together.
         mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower2, upper2))
     mask = cv2.erode(mask, None, iterations=2)
     mask = cv2.dilate(mask, None, iterations=2)
@@ -119,21 +106,14 @@ def build_mask(frame_bgr, lower, upper, lower2=None, upper2=None):
 
 
 def detect_ball(mask):
-    # Looks at every separate white blob in the mask and decides which
-    # one actually the ball. Returns its (x, y, radius) in pixels, 
-    # or None if nothing qualifies.
+    # Picks whichever white blob in the mask looks most like the ball.
+    # Returns its (x, y, radius) in pixels, or None if nothing qualifies.
+    #
+    # Circularity = blob area / area of its smallest enclosing circle. A
+    # perfect circle scores close to 1.0. Only blobs above
+    # MIN_CIRCULARITY count, and the largest of those wins.
 
-    # For every blob, area is measured, and the smallest possible circle
-    # that fully contains it also gets fit (minEnclosingCircle). Dividing
-    # the two, blob area vs that circle's area, gives a score. A blob 
-    # shaped like a circle fills almost all of its enclosing circle, scoring 
-    # close to 1.0. Only blobs above MIN_CIRCULARITY count, and the largest 
-    # one gets picked.
-    
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    # findContours traces the outline of every separate white blob in the
-    # mask and hands them back as a list. contours is that list, one
-    # entry per blob.
 
     best = None
     best_area = 0
@@ -175,8 +155,8 @@ def main():
                 break
 
             if args.tune:
-                # In tuning mode, use the sliders instead of the fixed constants,
-                # and only the one band.
+                # Tuning mode uses the sliders instead of the fixed
+                # constants, and only the one band.
                 lower, upper = read_trackbars()
                 mask = build_mask(frame, lower, upper)
             else:
@@ -189,18 +169,14 @@ def main():
             display = frame.copy()
             if result is not None:
                 x, y, radius = result
-                # Draws a green circle around the detected ball and a
-                # small red dot at its center, purely as a visual
-                # confirmation that the detection looks right.
+                # Green circle around the ball, red dot at its center.
                 cv2.circle(display, (int(x), int(y)), int(radius), (0, 255, 0), 2)
                 cv2.circle(display, (int(x), int(y)), 3, (0, 0, 255), -1)
                 print(f"x={x:.1f} y={y:.1f} radius={radius:.1f}")
 
             cv2.imshow(WINDOW_NAME, display)
             if args.tune:
-                # Shows the raw black-and-white mask based off 
-                # the current HSV range.
-                cv2.imshow(MASK_WINDOW_NAME, mask)
+                cv2.imshow(MASK_WINDOW_NAME, mask)  # raw mask for the current HSV range
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -212,7 +188,6 @@ def main():
         cv2.destroyAllWindows()
 
         if args.tune:
-            # Prints the final slider positions.
             lower, upper = read_trackbars()
             print(f"\nFinal HSV range, lower={tuple(lower)} upper={tuple(upper)}")
             print("Copy these into HSV_LOWER / HSV_UPPER at the top of this file.")

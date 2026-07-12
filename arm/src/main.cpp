@@ -1,53 +1,42 @@
-// Stepper motor bring-up firmware for the 7-DOF arm.
-//
-// Drives up to NUM_AXES NEMA17 steppers through A4988 drivers via
-// STEP/DIR pins. No limit switches or homing yet, that's follow-up
-// work. This is just for confirming each axis actually turns once
-// motors, drivers, and power are wired up, driven over a serial
-// console so there's no dependency on the rest of the arm code.
-//
-// Wiring, per axis:
-//   A4988 STEP -> the STEP pin below
-//   A4988 DIR  -> the DIR pin below
-//   A4988 EN   -> tied to GND directly, driver always enabled. Fine
-//                 for bring-up. Revisit with a shared enable pin once
-//                 the arm needs to sit idle without holding torque.
-//   A4988 VMOT/GND -> motor power supply, set to the stepper's rated
-//                 voltage, check its datasheet, don't just run it at
-//                 the supply's max.
-//   A4988 VDD/GND  -> 3.3V logic + GND from the ESP32 board.
-//
-// Pin choice note: GPIO4-18 on this board are shared with the onboard
-// camera header. Since this board isn't running a camera, vision runs
-// separately on a laptop over USB, those pins are free to use here.
-// If that ever changes, these assignments need to change too.
+// Stepper + servo bring-up firmware for the 7-DOF arm.
+// Drives NEMA17/A4988 stepper axes and one gripper servo over serial.
+// No limit switches or homing yet.
 //
 // Serial commands, 115200 baud:
 //   <axis> <steps>    move one axis a relative number of steps, e.g. 0 200
 //   speed <axis> <v>  set that axis's max speed in steps/sec
 //   stop              stop all axes immediately
+//   servo <angle>     move the gripper servo to an absolute angle, 0-180
 //   ?                 show this again
 
 #include <Arduino.h>
 #include <AccelStepper.h>
+#include <ESP32Servo.h>
 
 constexpr int NUM_AXES = 7;
+
+// Servo configuration (only one for now)
+constexpr int SERVO_PIN = 14;
+constexpr int SERVO_MIN_ANGLE = 0;
+constexpr int SERVO_MAX_ANGLE = 180;
+
+Servo gripperServo;
 
 struct AxisPins {
   uint8_t step;
   uint8_t dir;
 };
 
-// One STEP/DIR pair per joint. See wiring note above for why GPIO4-18
-// are safe to use on this board.
+// Stepper configuration
+// One STEP/DIR pair per joint
 const AxisPins AXIS_PINS[NUM_AXES] = {
-  {4, 5},
-  {6, 7},
-  {15, 16},
-  {17, 18},
-  {8, 9},
-  {10, 11},
-  {12, 13},
+  {1, 2},
+  {21, 47},
+  {48, 40},
+  {39, 38},
+  {37, 36},
+  {35, 41},
+  {42, 45},
 };
 
 constexpr float DEFAULT_MAX_SPEED = 500.0;     // steps/sec, conservative for first bring-up
@@ -69,6 +58,7 @@ void printHelp() {
   Serial.println("  <axis> <steps>    move one axis a relative number of steps, e.g. 0 200");
   Serial.println("  speed <axis> <v>  set that axis's max speed in steps/sec");
   Serial.println("  stop              stop all axes immediately");
+  Serial.println("  servo <angle>     move the gripper servo to an absolute angle, 0-180");
   Serial.println("  ?                 show this again");
 }
 
@@ -103,6 +93,18 @@ void handleCommand(String line) {
     return;
   }
 
+  if (line.startsWith("servo ")) {
+    int angle;
+    if (sscanf(line.c_str(), "servo %d", &angle) == 1 &&
+        angle >= SERVO_MIN_ANGLE && angle <= SERVO_MAX_ANGLE) {
+      gripperServo.write(angle);
+      Serial.printf("Servo moving to %d degrees.\n", angle);
+    } else {
+      Serial.printf("Usage: servo <angle %d-%d>\n", SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+    }
+    return;
+  }
+
   int axis, steps;
   if (sscanf(line.c_str(), "%d %d", &axis, &steps) == 2) {
     if (axis >= 0 && axis < NUM_AXES) {
@@ -127,6 +129,9 @@ void setup() {
     axes[i].setMaxSpeed(DEFAULT_MAX_SPEED);
     axes[i].setAcceleration(DEFAULT_ACCELERATION);
   }
+
+  gripperServo.setPeriodHertz(50);
+  gripperServo.attach(SERVO_PIN, 500, 2400);
 
   Serial.println("Stepper bring-up firmware ready.");
   printHelp();

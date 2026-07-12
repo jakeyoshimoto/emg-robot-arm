@@ -1,16 +1,12 @@
 """
-Works out the camera's real optical properties: camera matrix (focal
-length, optical center) and lens distortion, using the standard OpenCV
-checkerboard method. Every lens bends light a bit, more toward the edges
-of the frame. Need to know exactly how much, to turn a pixel position
-into a real-world position/angle later.
+Calibrates the camera: works out its camera matrix (focal length,
+optical center) and lens distortion coefficients, using OpenCV's
+standard checkerboard method. Needed later to turn a pixel position
+into a real-world position/angle.
 
-How it works:
 Show the camera a checkerboard from a bunch of angles and distances.
-Square size is known, so is the ideal flat layout of every inner corner.
-OpenCV finds where those corners actually land in each image. Comparing
-ideal vs. actual across many views solves for the lens math.
-cv2.calibrateCamera does this.
+OpenCV finds the inner corners in each captured frame and compares them
+against the known flat layout to solve for the lens math.
 
 Usage:
     python vision/camera_calibration.py
@@ -65,10 +61,9 @@ def parse_args():
 
 
 def build_object_points(cols, rows, square_size):
-    # The ground truth 3D positions of every corner on the checkerboard,
-    # as if it's lying flat with its top-left corner at (0, 0, 0), scaled
-    # into real millimeters. Every captured frame gets compared against
-    # this same ideal layout.
+    # Ground-truth 3D corner positions, board flat with top-left corner
+    # at (0, 0, 0), scaled to real millimeters. Every captured frame gets
+    # compared against this same ideal layout.
     objp = np.zeros((cols * rows, 3), np.float32)
     objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
     objp *= square_size
@@ -80,13 +75,10 @@ def main():
     board_size = (args.cols, args.rows)
     objp = build_object_points(args.cols, args.rows, args.square_size)
 
-    # When to stop the corner-refinement step: after 30 attempts, or once
-    # precise to within 0.001 of a pixel, whichever comes first.
+    # Stop corner refinement after 30 iterations or 0.001px precision,
+    # whichever comes first.
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
-    # Each captured frame adds one entry to both lists: where the corners
-    # should be (object_points, always the same ideal board) and where
-    # they were actually found (image_points, different every frame).
     object_points = []   # 3D points, one array per captured frame
     image_points = []    # 2D points, one array per captured frame
 
@@ -110,9 +102,7 @@ def main():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             found, corners = cv2.findChessboardCorners(gray, board_size, None)
 
-            # Drawn on a copy, not the original, just to show on screen
-            # whether the board is being recognized.
-            display = frame.copy()
+            display = frame.copy()  # draw on a copy so the raw frame stays clean
             if found:
                 cv2.drawChessboardCorners(display, board_size, corners, found)
 
@@ -126,8 +116,7 @@ def main():
             if key == ord("q"):
                 break
             if key == ord("c") and found:
-                # cornerSubPix refines the approximate corners to
-                # sub-pixel accuracy, keeps the calibration accurate.
+                # Refine the approximate corners to sub-pixel accuracy.
                 refined = cv2.cornerSubPix(
                     gray, corners, (11, 11), (-1, -1), criteria
                 )
@@ -141,8 +130,7 @@ def main():
         cv2.destroyAllWindows()
 
     if len(object_points) < 4:
-        # Too few frames/angles gives an untrustworthy result, so refuse
-        # to save rather than save something misleading.
+        # Too few frames/angles gives an untrustworthy result.
         print(
             f"Only {len(object_points)} frame(s) captured; need at least a "
             "handful (10+ recommended) from varied angles for a stable "
@@ -152,9 +140,8 @@ def main():
 
     # Solves for the camera matrix and distortion coefficients that best
     # explain object_points vs image_points across all captured frames.
-    # reprojection_error is the calibration grading its own homework: how
-    # far off its own predicted corner positions are, in pixels, from
-    # where the corners actually were.
+    # reprojection_error is how far off, in pixels, the solved model's
+    # predicted corners are from where the corners actually were.
     reprojection_error, camera_matrix, dist_coeffs, _, _ = cv2.calibrateCamera(
         object_points, image_points, frame_size, None, None
     )
@@ -180,8 +167,8 @@ def save_calibration(output_path, camera_matrix, dist_coeffs, frame_size,
                       reprojection_error, num_frames):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # cv2.FileStorage writes these out in OpenCV's own YAML format, so any
-    # other OpenCV script can load it back in with a couple of lines.
+    # OpenCV's own YAML format, so any other OpenCV script can load it
+    # back in with a couple of lines.
     fs = cv2.FileStorage(output_path, cv2.FILE_STORAGE_WRITE)
     fs.write("image_width", frame_size[0])
     fs.write("image_height", frame_size[1])

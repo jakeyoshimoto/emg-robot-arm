@@ -1,19 +1,15 @@
 """
-Tracks a hand in the live camera feed and reports whether it's open or
-closed (a fist), frame by frame. Uses MediaPipe's hand landmark model
-instead of color thresholding, a hand isn't one fixed color like the
-ball, and its shape changes a lot from pose to pose.
+Tracks a hand in the live camera feed and classifies it as open or
+closed, frame by frame. Uses MediaPipe's hand landmark model
+rather than color thresholding, since a hand isn't one fixed color and
+its shape changes a lot pose to pose.
 
-How it works:
-MediaPipe finds a hand in the frame and returns 21 landmark points on it,
-the wrist plus each knuckle and fingertip. Open vs closed is worked out
-from those points directly. For four fingers (index, middle, ring,
-pinky), compare each fingertip's distance from the wrist against its
-middle knuckle's distance from the wrist. Curled in, the tip is closer to
-the wrist than the knuckle is. Extended, it's farther. Count how many of
-the four fingers are extended, two or more counts as open, otherwise
-closed. Thumb is left out of the count, it moves sideways rather than
-curling the same way, so the same distance check doesn't hold up for it.
+For each of the four non-thumb fingers: extended if the fingertip is
+farther from the wrist than its knuckle is, curled if closer. The thumb
+folds across the palm instead of toward the wrist, so it's checked
+against the pinky's base knuckle instead. Overall state is "open" if 2+
+of the four non-thumb fingers are extended; the thumb is reported
+per-finger but doesn't count toward that total.
 
 First run downloads the hand landmark model file (a few MB) from Google
 and caches it in vision/models/. Needs internet access once.
@@ -26,7 +22,8 @@ Usage:
 Press 'q' or close the window to exit.
 
 Per-frame output:
-    Prints "hand N: open" / "hand N: closed" for each detected hand.
+    Prints "hand N: open (thumb:1 index:0 middle:1 ring:0 pinky:0)" for
+    each detected hand, where 1 = extended and 0 = curled.
 """
 
 import argparse
@@ -57,8 +54,7 @@ MODEL_URL = (
 
 WINDOW_NAME = "hand_tracking"
 
-# Landmark indices per MediaPipe's hand landmark layout. Each entry here
-# is (knuckle, tip) for one non-thumb finger.
+# Landmark indices per MediaPipe's hand layout, (knuckle, tip) per finger.
 FINGER_JOINTS = {
     "index": (6, 8),
     "middle": (10, 12),
@@ -66,6 +62,14 @@ FINGER_JOINTS = {
     "pinky": (18, 20),
 }
 WRIST = 0
+
+# Thumb doesn't fold toward the wrist like the other fingers, so it's
+# checked against the pinky's base knuckle instead (see module docstring).
+THUMB_MCP = 2
+THUMB_TIP = 4
+PINKY_MCP = 17
+
+FINGER_DISPLAY_ORDER = ["thumb", "index", "middle", "ring", "pinky"]
 
 HAND_CONNECTIONS = HandLandmarksConnections.HAND_CONNECTIONS
 
@@ -81,8 +85,7 @@ def parse_args():
 
 
 def ensure_model(model_path):
-    # Downloads the model once and caches it locally, same idea as a pip
-    # package, just not something pip manages.
+    # Downloads the model once and caches it locally.
     if os.path.exists(model_path):
         return
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
@@ -106,20 +109,27 @@ def build_landmarker(model_path, max_hands):
     return HandLandmarker.create_from_options(options)
 
 
-def classify_hand_state(landmarks):
+def classify_finger_states(landmarks):
     # landmarks is one hand's 21 points, normalized (0-1) image
-    # coordinates. See module docstring for the extended/curled logic.
-    wrist = landmarks[WRIST]
+    # coordinates. Returns {finger_name: 1 | 0} (1 = extended) for all
+    # five fingers, thumb included.
+    def dist(a_idx, b_idx):
+        a, b = landmarks[a_idx], landmarks[b_idx]
+        return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
 
-    def dist_from_wrist(idx):
-        lm = landmarks[idx]
-        return ((lm.x - wrist.x) ** 2 + (lm.y - wrist.y) ** 2) ** 0.5
+    finger_states = {}
+    for name, (knuckle_idx, tip_idx) in FINGER_JOINTS.items():
+        extended = dist(tip_idx, WRIST) > dist(knuckle_idx, WRIST)
+        finger_states[name] = 1 if extended else 0
 
-    extended_count = 0
-    for knuckle_idx, tip_idx in FINGER_JOINTS.values():
-        if dist_from_wrist(tip_idx) > dist_from_wrist(knuckle_idx):
-            extended_count += 1
+    thumb_extended = dist(THUMB_TIP, PINKY_MCP) > dist(THUMB_MCP, PINKY_MCP)
+    finger_states["thumb"] = 1 if thumb_extended else 0
+    return finger_states
 
+
+def classify_hand_state(finger_states):
+    # Non-thumb fingers only, see module docstring.
+    extended_count = sum(finger_states[name] for name in FINGER_JOINTS)
     return "open" if extended_count >= EXTENDED_FINGERS_FOR_OPEN else "closed"
 
 
@@ -161,8 +171,7 @@ def main():
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-            # detect_for_video needs a strictly increasing timestamp per
-            # call, wall-clock time since start covers that.
+            # detect_for_video needs a strictly increasing timestamp per call.
             timestamp_ms = int((time.time() - start_time) * 1000)
             if timestamp_ms <= last_timestamp_ms:
                 timestamp_ms = last_timestamp_ms + 1
@@ -172,9 +181,13 @@ def main():
 
             display = frame.copy()
             for i, hand_landmarks in enumerate(result.hand_landmarks):
-                state = classify_hand_state(hand_landmarks)
+                finger_states = classify_finger_states(hand_landmarks)
+                state = classify_hand_state(finger_states)
                 draw_hand(display, hand_landmarks, state)
-                print(f"hand {i}: {state}")
+                fingers_str = " ".join(
+                    f"{name}:{finger_states[name]}" for name in FINGER_DISPLAY_ORDER
+                )
+                print(f"hand {i}: {state} ({fingers_str})")
 
             cv2.imshow(WINDOW_NAME, display)
 

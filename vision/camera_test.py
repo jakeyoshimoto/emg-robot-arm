@@ -1,8 +1,7 @@
 """
-Quick sanity check to confirm the camera works before building anything
-more complicated on top of it. Opens the webcam, shows what it sees in a
-window, prints resolution and frame rate. If this doesn't run cleanly,
-nothing else in this folder will either.
+Sanity-checks the webcam. Opens it, shows the live feed, prints
+resolution and measured FPS. Run this first if anything vision-related
+misbehaves.
 
 Usage:
     python vision/camera_test.py
@@ -16,16 +15,14 @@ import time
 
 import cv2
 
-# Starting values if nothing is passed on the command line.
-CAMERA_INDEX = 0        # which camera to use. 0 is usually the first/only one plugged in
+# Defaults, override via CLI args.
+CAMERA_INDEX = 0  # 0 is usually the first/only camera plugged in
 REQUESTED_WIDTH = 640
 REQUESTED_HEIGHT = 480
 WINDOW_NAME = "camera_test"
 
 
 def parse_args():
-    # Reads command-line args like --index 1 into args.index, args.width,
-    # args.height. Falls back to the defaults above if nothing is passed.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", type=int, default=CAMERA_INDEX,
                          help="camera device index (default: %(default)s)")
@@ -39,8 +36,6 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # cap is the open connection to the camera. Read frames from it,
-    # close it when done, same as a file.
     cap = cv2.VideoCapture(args.index)
     if not cap.isOpened():
         raise RuntimeError(
@@ -48,7 +43,7 @@ def main():
             "Check that it's connected and not in use by another app."
         )
 
-    # Only a request, some cameras ignore it, hence checking actual after.
+    # Some cameras ignore the requested size, so check what we actually got.
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
 
@@ -57,7 +52,7 @@ def main():
     print(f"Requested resolution: {args.width}x{args.height}")
     print(f"Actual resolution:    {actual_width}x{actual_height}")
 
-    # FPS measured by counting frames over a short window, then dividing.
+    # FPS = frames counted over a short window, divided by elapsed time.
     frame_count = 0
     fps_report_interval = 2.0  # seconds between FPS prints
     window_start_time = time.time()
@@ -79,18 +74,14 @@ def main():
 
             cv2.imshow(WINDOW_NAME, frame)
 
-            # waitKey also lets the window redraw, so it has to run even
-            # when key presses aren't the concern.
+            # waitKey also redraws the window, so it has to run every loop.
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
-            # Covers clicking the 'X' button instead of pressing 'q'.
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-                break
+                break  # covers clicking the window's 'X' button
     finally:
-        # Runs no matter how the loop ends, so the camera doesn't stay
-        # locked for other programs.
-        cap.release()
+        cap.release()  # always release, even if the loop broke via an exception
         cv2.destroyAllWindows()
 
 
