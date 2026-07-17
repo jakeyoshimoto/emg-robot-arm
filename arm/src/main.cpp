@@ -1,42 +1,35 @@
 // Stepper + servo bring-up firmware for the 7-DOF arm.
-// Drives NEMA17/A4988 stepper axes and one gripper servo over serial.
-// No limit switches or homing yet.
+// Drives NEMA17/A4988 stepper axes and 5 gripper/hand servos over serial.
+// Servos run through a PCA9685 I2C PWM driver board. No limit switches
+// or homing yet.
 //
 // Serial commands, 115200 baud:
-//   <axis> <steps>    move one axis a relative number of steps, e.g. 0 200
-//   speed <axis> <v>  set that axis's max speed in steps/sec
-//   stop              stop all axes immediately
-//   servo <angle>     move the gripper servo to an absolute angle, 0-180
-//   ?                 show this again
+//   m<axis> <steps>      move one motor a relative number of steps, e.g. m0 200
+//   speed m<axis> <v>    set that motor's max speed in steps/sec
+//   stop                 stop all motors immediately
+//   s<ch> <angle>        move one servo channel to an absolute angle, 0-180
+//   ?                    show this again
 
 #include <Arduino.h>
 #include <AccelStepper.h>
-#include <ESP32Servo.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
 
-constexpr int NUM_AXES = 7;
-
-// Servo configuration (only one for now)
-constexpr int SERVO_PIN = 14;
-constexpr int SERVO_MIN_ANGLE = 0;
-constexpr int SERVO_MAX_ANGLE = 180;
-
-Servo gripperServo;
+constexpr int NUM_AXES = 6;
 
 struct AxisPins {
   uint8_t step;
   uint8_t dir;
 };
 
-// Stepper configuration
-// One STEP/DIR pair per joint
+// Stepper configuration - one STEP/DIR pair per joint
 const AxisPins AXIS_PINS[NUM_AXES] = {
   {1, 2},
-  {21, 47},
-  {48, 40},
-  {39, 38},
-  {37, 36},
-  {35, 41},
-  {42, 45},
+  {42, 41},
+  {40, 39},
+  {38, 37},
+  {36, 35},
+  {48, 47},
 };
 
 constexpr float DEFAULT_MAX_SPEED = 500.0;     // steps/sec, conservative for first bring-up
@@ -49,17 +42,33 @@ AccelStepper axes[NUM_AXES] = {
   AccelStepper(AccelStepper::DRIVER, AXIS_PINS[3].step, AXIS_PINS[3].dir),
   AccelStepper(AccelStepper::DRIVER, AXIS_PINS[4].step, AXIS_PINS[4].dir),
   AccelStepper(AccelStepper::DRIVER, AXIS_PINS[5].step, AXIS_PINS[5].dir),
-  AccelStepper(AccelStepper::DRIVER, AXIS_PINS[6].step, AXIS_PINS[6].dir),
 };
+
+// Servo configuration - PCA9685 over I2C, default address 0x40
+constexpr int I2C_SDA_PIN = 21;
+constexpr int I2C_SCL_PIN = 45;  // strapping pin, only sampled at boot
+constexpr int NUM_SERVOS = 6;
+constexpr int SERVO_MIN_ANGLE = 0;
+constexpr int SERVO_MAX_ANGLE = 180;
+constexpr int SERVO_MIN_PULSE_US = 500;
+constexpr int SERVO_MAX_PULSE_US = 2400;
+constexpr float PWM_FREQ_HZ = 50.0;
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+uint16_t angleToTicks(int angle) {
+  long pulseUs = map(angle, 0, 180, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
+  return (uint16_t)((pulseUs * 4096L) / (long)(1000000.0 / PWM_FREQ_HZ));
+}
 
 void printHelp() {
   Serial.println();
   Serial.println("Commands:");
-  Serial.println("  <axis> <steps>    move one axis a relative number of steps, e.g. 0 200");
-  Serial.println("  speed <axis> <v>  set that axis's max speed in steps/sec");
-  Serial.println("  stop              stop all axes immediately");
-  Serial.println("  servo <angle>     move the gripper servo to an absolute angle, 0-180");
-  Serial.println("  ?                 show this again");
+  Serial.println("  m<axis> <steps>    move one motor a relative number of steps, e.g. m0 200");
+  Serial.println("  speed m<axis> <v>  set that motor's max speed in steps/sec");
+  Serial.println("  stop               stop all motors immediately");
+  Serial.println("  s<ch> <angle>      move one servo channel to an absolute angle, 0-180");
+  Serial.println("  ?                  show this again");
 }
 
 void handleCommand(String line) {
@@ -77,41 +86,44 @@ void handleCommand(String line) {
     for (int i = 0; i < NUM_AXES; i++) {
       axes[i].stop();
     }
-    Serial.println("Stopped all axes.");
+    Serial.println("Stopped all motors.");
     return;
   }
 
   if (line.startsWith("speed ")) {
     int axis, value;
-    if (sscanf(line.c_str(), "speed %d %d", &axis, &value) == 2 &&
+    if (sscanf(line.c_str(), "speed m%d %d", &axis, &value) == 2 &&
         axis >= 0 && axis < NUM_AXES) {
       axes[axis].setMaxSpeed((float)value);
-      Serial.printf("Axis %d max speed set to %d steps/sec.\n", axis, value);
+      Serial.printf("Motor %d max speed set to %d steps/sec.\n", axis, value);
     } else {
-      Serial.println("Usage: speed <axis> <steps/sec>");
+      Serial.println("Usage: speed m<axis> <steps/sec>");
     }
     return;
   }
 
-  if (line.startsWith("servo ")) {
-    int angle;
-    if (sscanf(line.c_str(), "servo %d", &angle) == 1 &&
-        angle >= SERVO_MIN_ANGLE && angle <= SERVO_MAX_ANGLE) {
-      gripperServo.write(angle);
-      Serial.printf("Servo moving to %d degrees.\n", angle);
-    } else {
-      Serial.printf("Usage: servo <angle %d-%d>\n", SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
-    }
-    return;
-  }
-
-  int axis, steps;
-  if (sscanf(line.c_str(), "%d %d", &axis, &steps) == 2) {
-    if (axis >= 0 && axis < NUM_AXES) {
+  if (line.startsWith("m")) {
+    int axis, steps;
+    if (sscanf(line.c_str(), "m%d %d", &axis, &steps) == 2 &&
+        axis >= 0 && axis < NUM_AXES) {
       axes[axis].move(steps);
-      Serial.printf("Axis %d moving %d steps.\n", axis, steps);
+      Serial.printf("Motor %d moving %d steps.\n", axis, steps);
     } else {
-      Serial.printf("Axis must be 0-%d.\n", NUM_AXES - 1);
+      Serial.printf("Usage: m<axis 0-%d> <steps>\n", NUM_AXES - 1);
+    }
+    return;
+  }
+
+  if (line.startsWith("s")) {
+    int channel, angle;
+    if (sscanf(line.c_str(), "s%d %d", &channel, &angle) == 2 &&
+        channel >= 0 && channel < NUM_SERVOS &&
+        angle >= SERVO_MIN_ANGLE && angle <= SERVO_MAX_ANGLE) {
+      pwm.setPWM(channel, 0, angleToTicks(angle));
+      Serial.printf("Servo %d moving to %d degrees.\n", channel, angle);
+    } else {
+      Serial.printf("Usage: s<channel 0-%d> <angle %d-%d>\n",
+                     NUM_SERVOS - 1, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
     }
     return;
   }
@@ -130,10 +142,11 @@ void setup() {
     axes[i].setAcceleration(DEFAULT_ACCELERATION);
   }
 
-  gripperServo.setPeriodHertz(50);
-  gripperServo.attach(SERVO_PIN, 500, 2400);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  pwm.begin();
+  pwm.setPWMFreq(PWM_FREQ_HZ);
 
-  Serial.println("Stepper bring-up firmware ready.");
+  Serial.println("Stepper + servo bring-up firmware ready.");
   printHelp();
 }
 
