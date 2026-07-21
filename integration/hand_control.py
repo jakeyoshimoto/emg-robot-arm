@@ -36,15 +36,10 @@ BAUD_RATE = 115200
 # in arm/src/main.cpp) plus the angle sent for curled vs extended. Each
 # servo is mounted at its own orientation, so curled/extended need
 # calibrating individually per finger - edit these once real angles are
-# known.
-#
-# The thumb drives two channels from vision/hand_tracking.py's two
-# separate thumb signals: "thumb_lower" (channel 0) is the lower joint
-# rotating/opposing across the palm, "thumb" (channel 1) is just the
-# bend at the thumb's last joint - so channel 1 only moves for an
-# actual thumb curl, not whenever the thumb rotates.
+# known. Channel 0 is reserved for the thumb's lower joint (rotates the
+# thumb inward) and isn't driven yet - classify_finger_states() has no
+# signal for it.
 FINGER_SERVOS = {
-    "thumb_lower": {"channel": 0, "curled": 0, "extended": 180},  # lower joint / rotation, needs calibration
     "thumb": {"channel": 1, "curled": 0, "extended": 180},
     "index": {"channel": 2, "curled": 0, "extended": 180},
     "middle": {"channel": 3, "curled": 0, "extended": 180},
