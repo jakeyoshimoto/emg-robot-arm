@@ -11,6 +11,16 @@ against the pinky's base knuckle instead. Overall state is "open" if 2+
 of the four non-thumb fingers are extended; the thumb is reported
 per-finger but doesn't count toward that total.
 
+The thumb has two independent signals, since it has two joints that
+move separately: "thumb_lower" is the base joint's rotation/opposition
+across the palm, measured as the angle at the CMC joint between the MCP
+and pinky-knuckle landmarks (not the tip, so curling the last joint
+doesn't affect it); "thumb" is just the bend at the last joint, measured
+in 3D (using MediaPipe's relative z) so it stays flat when the base
+rotates instead of picking up 2D foreshortening as a "bend". Both are
+angle-based with a wide swing between straight and curled, which is
+more resistant to landmark jitter than a raw distance comparison.
+
 First run downloads the hand landmark model file (a few MB) from Google
 and caches it in vision/models/. Needs internet access once.
 
@@ -22,11 +32,15 @@ Usage:
 Press 'q' or close the window to exit.
 
 Per-frame output:
-    Prints "hand N: open (thumb:1 index:0 middle:1 ring:0 pinky:0)" for
-    each detected hand, where 1 = extended and 0 = curled.
+    Prints "hand N: open (thumb_lower:1 thumb:0 index:0 middle:1 ring:0
+    pinky:0) thumb_lower_angle=142 thumb_angle=61" for each detected
+    hand - the angle suffixes are the raw joint angles behind
+    thumb_lower/thumb, useful for tuning the two THUMB_*_STRAIGHT_ANGLE_DEG
+    thresholds below against your own camera/hand.
 """
 
 import argparse
+import math
 import os
 import time
 import urllib.request
@@ -65,11 +79,20 @@ WRIST = 0
 
 # Thumb doesn't fold toward the wrist like the other fingers, so it's
 # checked against the pinky's base knuckle instead (see module docstring).
+THUMB_CMC = 1
 THUMB_MCP = 2
+THUMB_IP = 3
 THUMB_TIP = 4
 PINKY_MCP = 17
 
-FINGER_DISPLAY_ORDER = ["thumb", "index", "middle", "ring", "pinky"]
+# Below these angles (degrees), the corresponding thumb joint is
+# considered curled rather than straight. 180 = perfectly straight.
+# Both are starting points - tune against the printed raw angles
+# (see module docstring) for your own hand/camera setup.
+THUMB_LOWER_STRAIGHT_ANGLE_DEG = 90
+THUMB_STRAIGHT_ANGLE_DEG = 160
+
+FINGER_DISPLAY_ORDER = ["thumb_lower", "thumb", "index", "middle", "ring", "pinky"]
 
 HAND_CONNECTIONS = HandLandmarksConnections.HAND_CONNECTIONS
 
@@ -109,21 +132,50 @@ def build_landmarker(model_path, max_hands):
     return HandLandmarker.create_from_options(options)
 
 
+def _joint_angle_deg(landmarks, a_idx, b_idx, c_idx):
+    # Angle at b_idx, in 3D, between rays toward a_idx and c_idx. Uses
+    # MediaPipe's relative z (not just x, y) so the angle reflects the
+    # joint's actual bend, not 2D foreshortening when the joint rotates
+    # out of the image plane. 180 = the three points are collinear
+    # (joint is straight).
+    a, b, c = landmarks[a_idx], landmarks[b_idx], landmarks[c_idx]
+    v1 = (a.x - b.x, a.y - b.y, a.z - b.z)
+    v2 = (c.x - b.x, c.y - b.y, c.z - b.z)
+    mag1 = math.sqrt(sum(v * v for v in v1))
+    mag2 = math.sqrt(sum(v * v for v in v2))
+    if mag1 == 0 or mag2 == 0:
+        return 180.0
+    dot = sum(p * q for p, q in zip(v1, v2))
+    cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+    return math.degrees(math.acos(cos_angle))
+
+
 def classify_finger_states(landmarks):
     # landmarks is one hand's 21 points, normalized (0-1) image
-    # coordinates. Returns {finger_name: 1 | 0} (1 = extended) for all
-    # five fingers, thumb included.
+    # coordinates. Returns {finger_name: 1 | 0} (1 = extended) for the
+    # four non-thumb fingers, plus "thumb_lower" and "thumb" (see module
+    # docstring for what each thumb signal means), plus the raw angles
+    # behind those two ("thumb_lower_angle_deg", "thumb_angle_deg") for
+    # tuning - not 1/0, ignore these two if you just want finger state.
     def dist(a_idx, b_idx):
         a, b = landmarks[a_idx], landmarks[b_idx]
-        return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
+        return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2) ** 0.5
 
     finger_states = {}
     for name, (knuckle_idx, tip_idx) in FINGER_JOINTS.items():
         extended = dist(tip_idx, WRIST) > dist(knuckle_idx, WRIST)
         finger_states[name] = 1 if extended else 0
 
-    thumb_extended = dist(THUMB_TIP, PINKY_MCP) > dist(THUMB_MCP, PINKY_MCP)
-    finger_states["thumb"] = 1 if thumb_extended else 0
+    # Angle at the CMC joint between the MCP and pinky-knuckle rays -
+    # not the tip, so curling the last joint ("thumb", below) can't
+    # move this signal. Shrinks as the thumb sweeps toward opposition.
+    thumb_lower_angle = _joint_angle_deg(landmarks, THUMB_MCP, THUMB_CMC, PINKY_MCP)
+    finger_states["thumb_lower"] = 1 if thumb_lower_angle >= THUMB_LOWER_STRAIGHT_ANGLE_DEG else 0
+    finger_states["thumb_lower_angle_deg"] = thumb_lower_angle
+
+    thumb_angle = _joint_angle_deg(landmarks, THUMB_MCP, THUMB_IP, THUMB_TIP)
+    finger_states["thumb"] = 1 if thumb_angle >= THUMB_STRAIGHT_ANGLE_DEG else 0
+    finger_states["thumb_angle_deg"] = thumb_angle
     return finger_states
 
 
@@ -187,7 +239,11 @@ def main():
                 fingers_str = " ".join(
                     f"{name}:{finger_states[name]}" for name in FINGER_DISPLAY_ORDER
                 )
-                print(f"hand {i}: {state} ({fingers_str})")
+                print(
+                    f"hand {i}: {state} ({fingers_str}) "
+                    f"thumb_lower_angle={finger_states['thumb_lower_angle_deg']:.0f} "
+                    f"thumb_angle={finger_states['thumb_angle_deg']:.0f}"
+                )
 
             cv2.imshow(WINDOW_NAME, display)
 
