@@ -1,13 +1,15 @@
 // Stepper + servo bring-up firmware for the 7-DOF arm.
 // Drives NEMA17/A4988 stepper axes and 5 gripper/hand servos over serial.
-// Servos run through a PCA9685 I2C PWM driver board. No limit switches
-// or homing yet.
+// Servos run through a PCA9685 I2C PWM driver board. Also reads a
+// single-channel analog EMG sensor on GPIO5 for bring-up testing. No
+// limit switches or homing yet.
 //
 // Serial commands, 115200 baud:
 //   m<axis> <steps>      move one motor a relative number of steps, e.g. m0 200
 //   speed m<axis> <v>    set that motor's max speed in steps/sec
 //   stop                 stop all motors immediately
 //   s<ch> <angle>        move one servo channel to an absolute angle, 0-180
+//   emg                  toggle streaming raw EMG readings ("emg <0-4095>")
 //   ?                    show this again
 
 #include <Arduino.h>
@@ -56,6 +58,18 @@ constexpr float PWM_FREQ_HZ = 50.0;
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
+// EMG sensor (Advancer Technologies Muscle Sensor v3 or clone) - needs
+// a dual +Vs/-Vs supply (e.g. two 9V batteries, center tap = GND), and
+// its SIG output swings 0-Vs, so it goes through an external resistor
+// divider (SIG -> 20k -> node -> 10k -> GND, node -> GPIO5) to land
+// within the ADC's 0-3.3V range before reaching this pin. GPIO5 is
+// ADC1_CH4, free and not shared with any stepper/I2C pin above.
+constexpr int EMG_PIN = 5;
+constexpr unsigned long EMG_SAMPLE_INTERVAL_MS = 20;  // ~50 Hz
+
+bool emgStreaming = false;
+unsigned long lastEmgSampleMs = 0;
+
 uint16_t angleToTicks(int angle) {
   long pulseUs = map(angle, 0, 180, SERVO_MIN_PULSE_US, SERVO_MAX_PULSE_US);
   return (uint16_t)((pulseUs * 4096L) / (long)(1000000.0 / PWM_FREQ_HZ));
@@ -68,6 +82,7 @@ void printHelp() {
   Serial.println("  speed m<axis> <v>  set that motor's max speed in steps/sec");
   Serial.println("  stop               stop all motors immediately");
   Serial.println("  s<ch> <angle>      move one servo channel to an absolute angle, 0-180");
+  Serial.println("  emg                toggle streaming raw EMG readings (\"emg <0-4095>\")");
   Serial.println("  ?                  show this again");
 }
 
@@ -114,6 +129,12 @@ void handleCommand(String line) {
     return;
   }
 
+  if (line == "emg") {
+    emgStreaming = !emgStreaming;
+    Serial.println(emgStreaming ? "EMG streaming on." : "EMG streaming off.");
+    return;
+  }
+
   if (line.startsWith("s")) {
     int channel, angle;
     if (sscanf(line.c_str(), "s%d %d", &channel, &angle) == 2 &&
@@ -146,6 +167,10 @@ void setup() {
   pwm.begin();
   pwm.setPWMFreq(PWM_FREQ_HZ);
 
+  pinMode(EMG_PIN, INPUT);
+  analogReadResolution(12);                     // 0-4095 across 0-3.3V
+  analogSetPinAttenuation(EMG_PIN, ADC_11db);    // full 0-3.3V input range
+
   Serial.println("Stepper + servo bring-up firmware ready.");
   printHelp();
 }
@@ -158,5 +183,10 @@ void loop() {
 
   for (int i = 0; i < NUM_AXES; i++) {
     axes[i].run();
+  }
+
+  if (emgStreaming && millis() - lastEmgSampleMs >= EMG_SAMPLE_INTERVAL_MS) {
+    lastEmgSampleMs = millis();
+    Serial.printf("emg %d\n", analogRead(EMG_PIN));
   }
 }
