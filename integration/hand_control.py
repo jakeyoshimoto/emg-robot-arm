@@ -36,16 +36,24 @@ BAUD_RATE = 115200
 # in arm/src/main.cpp) plus the angle sent for curled vs extended. Each
 # servo is mounted at its own orientation, so curled/extended need
 # calibrating individually per finger - edit these once real angles are
-# known. Channel 0 is reserved for the thumb's lower joint (rotates the
-# thumb inward) and isn't driven yet - classify_finger_states() has no
-# signal for it.
+# known.
 FINGER_SERVOS = {
-    "thumb": {"channel": 1, "curled": 0, "extended": 180},
     "index": {"channel": 2, "curled": 0, "extended": 180},
     "middle": {"channel": 3, "curled": 0, "extended": 180},
     "ring": {"channel": 4, "curled": 0, "extended": 180},
     "pinky": {"channel": 5, "curled": 180, "extended": 0},
 }
+
+# The thumb drives two servos off the same classify_finger_states()
+# "thumb" signal (splitting that into separate lower-joint/curl vision
+# signals was tried and proved too noisy, see CLAUDE.md), sent one after
+# the other rather than simultaneously so the joints don't fight each
+# other: closing curls the lower joint (0) first, then the thumb (1);
+# opening reverses that order. Angles are calibrated the same way as
+# FINGER_SERVOS above - edit once real angles are known.
+THUMB_LOWER_SERVO = {"channel": 0, "curled": 50, "extended": 180}
+THUMB_SERVO = {"channel": 1, "curled": 0, "extended": 180}
+THUMB_SEQUENCE_DELAY = 0.15  # seconds between the lower-joint and thumb servo moves
 
 
 class ArmLink:
@@ -58,15 +66,36 @@ class ArmLink:
         self._last_angle = {}  # channel -> last angle sent
 
     def send_finger_states(self, finger_states):
+        if "thumb" in finger_states:
+            self._send_thumb(bool(finger_states["thumb"]))
         for name, servo in FINGER_SERVOS.items():
             if name not in finger_states:
                 continue
-            channel = servo["channel"]
             angle = servo["extended"] if finger_states[name] else servo["curled"]
-            if self._last_angle.get(channel) == angle:
-                continue
-            self.ser.write(f"s{channel} {angle}\n".encode("ascii"))
-            self._last_angle[channel] = angle
+            self._send(servo["channel"], angle)
+
+    def _send_thumb(self, extended):
+        lower_angle = THUMB_LOWER_SERVO["extended"] if extended else THUMB_LOWER_SERVO["curled"]
+        thumb_angle = THUMB_SERVO["extended"] if extended else THUMB_SERVO["curled"]
+        if (
+            self._last_angle.get(THUMB_LOWER_SERVO["channel"]) == lower_angle
+            and self._last_angle.get(THUMB_SERVO["channel"]) == thumb_angle
+        ):
+            return
+        if extended:
+            self._send(THUMB_SERVO["channel"], thumb_angle)
+            time.sleep(THUMB_SEQUENCE_DELAY)
+            self._send(THUMB_LOWER_SERVO["channel"], lower_angle)
+        else:
+            self._send(THUMB_LOWER_SERVO["channel"], lower_angle)
+            time.sleep(THUMB_SEQUENCE_DELAY)
+            self._send(THUMB_SERVO["channel"], thumb_angle)
+
+    def _send(self, channel, angle):
+        if self._last_angle.get(channel) == angle:
+            return
+        self.ser.write(f"s{channel} {angle}\n".encode("ascii"))
+        self._last_angle[channel] = angle
 
     def close(self):
         self.ser.close()
