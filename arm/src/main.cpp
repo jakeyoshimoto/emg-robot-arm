@@ -1,11 +1,17 @@
-// Stepper + servo bring-up firmware for the 7-DOF arm.
+// Stepper + servo bring-up firmware for the 6-DOF arm.
 // Drives NEMA17/A4988 stepper axes and 5 gripper/hand servos over serial.
 // Servos run through a PCA9685 I2C PWM driver board. Also reads a
-// single-channel analog EMG sensor on GPIO5 for bring-up testing. No
-// limit switches or homing yet.
+// single-channel analog EMG sensor on GPIO5 for bring-up testing (legacy,
+// unused now that the project has moved to camera-guided control). No
+// limit switches or homing yet, so each axis is soft-capped in firmware
+// to one full output/joint rotation (accounting for gear ratio) in either
+// direction from wherever it powered on - see maxAxisSteps().
 //
 // Serial commands, 115200 baud:
 //   m<axis> <steps>      move one motor a relative number of steps, e.g. m0 200
+//                         (clamped to +/-1 output rev from power-on position:
+//                         +/-6000 steps on the geared axes 0-4, +/-200 on
+//                         axis 5, the direct-drive hand)
 //   speed m<axis> <v>    set that motor's max speed in steps/sec
 //   stop                 stop all motors immediately
 //   s<ch> <angle>        move one servo channel to an absolute angle, 0-180
@@ -36,6 +42,21 @@ const AxisPins AXIS_PINS[NUM_AXES] = {
 
 constexpr float DEFAULT_MAX_SPEED = 500.0;     // steps/sec, conservative for first bring-up
 constexpr float DEFAULT_ACCELERATION = 250.0;  // steps/sec^2
+
+// Motor/gearbox configuration. Every motor is 200 full steps/rev (1.8
+// deg/step, no microstepping) at its own shaft. Axes 0-4 drive their joint
+// through a 30:1 cycloidal gearbox, so it takes 200*30 = 6000 motor steps
+// for one output/joint rotation; axis 5 (the hand) is direct-drive with no
+// gearbox, so 200 motor steps is one output rotation there.
+constexpr int STEPS_PER_MOTOR_REV = 200;
+const int GEAR_RATIO[NUM_AXES] = {30, 30, 30, 30, 30, 1};
+
+// No limit switches or homing yet, so as a stand-in safety limit, cap each
+// axis to one full *output/joint* rotation (accounting for that axis's
+// gear ratio) in either direction from wherever it happened to power on.
+long maxAxisSteps(int axis) {
+  return (long)STEPS_PER_MOTOR_REV * GEAR_RATIO[axis];
+}
 
 AccelStepper axes[NUM_AXES] = {
   AccelStepper(AccelStepper::DRIVER, AXIS_PINS[0].step, AXIS_PINS[0].dir),
@@ -79,6 +100,8 @@ void printHelp() {
   Serial.println();
   Serial.println("Commands:");
   Serial.println("  m<axis> <steps>    move one motor a relative number of steps, e.g. m0 200");
+  Serial.println("                     (clamped to +/-1 output rev from power-on: +/-6000 steps");
+  Serial.println("                     on geared axes 0-4, +/-200 on axis 5 the direct-drive hand)");
   Serial.println("  speed m<axis> <v>  set that motor's max speed in steps/sec");
   Serial.println("  stop               stop all motors immediately");
   Serial.println("  s<ch> <angle>      move one servo channel to an absolute angle, 0-180");
@@ -121,8 +144,15 @@ void handleCommand(String line) {
     int axis, steps;
     if (sscanf(line.c_str(), "m%d %d", &axis, &steps) == 2 &&
         axis >= 0 && axis < NUM_AXES) {
-      axes[axis].move(steps);
-      Serial.printf("Motor %d moving %d steps.\n", axis, steps);
+      long limit = maxAxisSteps(axis);
+      long target = axes[axis].currentPosition() + (long)steps;
+      long clampedTarget = constrain(target, -limit, limit);
+      if (clampedTarget != target) {
+        Serial.printf("Motor %d move clamped to stay within +/-%ld steps (1 output rev) of power-on position.\n",
+                      axis, limit);
+      }
+      axes[axis].moveTo(clampedTarget);
+      Serial.printf("Motor %d moving to %ld steps from power-on.\n", axis, clampedTarget);
     } else {
       Serial.printf("Usage: m<axis 0-%d> <steps>\n", NUM_AXES - 1);
     }

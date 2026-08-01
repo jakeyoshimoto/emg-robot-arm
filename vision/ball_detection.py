@@ -33,8 +33,8 @@ import numpy as np
 # A second band (HSV_LOWER2/HSV_UPPER2) is only needed for colors like red
 # that wrap around past hue 179; blue sits mid-range so one band covers it.
 
-HSV_LOWER = (85, 90, 60)
-HSV_UPPER = (105, 255, 255)
+HSV_LOWER = (95, 80, 55)
+HSV_UPPER = (130, 255, 255)
 HSV_LOWER2 = None
 HSV_UPPER2 = None
 
@@ -42,6 +42,13 @@ CAMERA_INDEX = 0
 MIN_RADIUS_PX = 8          # blobs smaller than this get ignored as noise, not the ball
 MIN_CONTOUR_AREA_PX = 150  # a second, area-based noise filter, belt-and-braces with the radius one
 MIN_CIRCULARITY = 0.55     # how round a blob has to be to count as "the ball". see detect_ball()
+
+# Balls with non-target-colored markings (e.g. basketball-style seam
+# lines) leave thin gaps in the mask that can fragment one ball into
+# several smaller blobs, each too small/irregular to pass the checks
+# above. This closes gaps up to roughly this many pixels wide before
+# contours are found, so those fragments merge back into one blob.
+STRIPE_CLOSE_KERNEL_PX = 15
 
 WINDOW_NAME = "ball_detection"
 TUNE_WINDOW_NAME = "tuning"
@@ -102,6 +109,15 @@ def build_mask(frame_bgr, lower, upper, lower2=None, upper2=None):
         mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower2, upper2))
     mask = cv2.erode(mask, None, iterations=2)
     mask = cv2.dilate(mask, None, iterations=2)
+
+    # Bridge gaps left by any non-target-colored markings on the ball
+    # (e.g. seam lines) so they don't fragment it into multiple blobs -
+    # see STRIPE_CLOSE_KERNEL_PX above.
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (STRIPE_CLOSE_KERNEL_PX, STRIPE_CLOSE_KERNEL_PX)
+    )
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+
     return mask
 
 
@@ -184,11 +200,16 @@ def main():
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
     finally:
+        # Read the final slider positions (if any) before tearing down the
+        # window they live on - destroyAllWindows() first would leave
+        # read_trackbars() nothing to read from and crash on exit.
+        if args.tune:
+            lower, upper = read_trackbars()
+
         cap.release()
         cv2.destroyAllWindows()
 
         if args.tune:
-            lower, upper = read_trackbars()
             print(f"\nFinal HSV range, lower={tuple(lower)} upper={tuple(upper)}")
             print("Copy these into HSV_LOWER / HSV_UPPER at the top of this file.")
 

@@ -1,18 +1,18 @@
 # emg-robot-arm
 
-A 30-day project to build an EMG-controlled robotic hand mounted on a
-7-DOF robotic arm, the hand reads muscle signals to control grip, and
-the arm autonomously locates and moves objects.
+A project to build a 6-DOF robotic arm that uses a tripod-mounted
+camera to visually locate a ball on a table and autonomously moves to
+grab it. Earlier plans to control the gripper via EMG (muscle-signal)
+gestures have been dropped in favor of this camera-only approach.
 
 ```
 emg-robot-arm/
 ├── README.md
 ├── requirements.txt
-├── hand/          # EMG acquisition, gesture classifier, servo control
 ├── arm/           # PlatformIO firmware for the arm's stepper motors
-├── vision/        # camera calibration, object detection, path planning
-├── integration/   # unified control loop, end-to-end tests
-├── hardware/      # CAD files, wiring diagrams, bom.csv
+├── CAD/           # CAD/STL files for the arm and gripper
+├── vision/        # camera calibration, ball detection, hand tracking
+├── integration/   # wires vision output to arm serial commands
 ├── docs/          # gantt chart / deadlines
-└── scripts/       # setup/utility scripts
+└── datasheets/    # reference PDFs
 ```
